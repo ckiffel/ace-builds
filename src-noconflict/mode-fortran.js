@@ -124,7 +124,8 @@ var FortranHighlightRules = function() {
             regex : integer + "\\b"
         }, {
             token : "keyword", // pre-compiler directives
-            regex : "#\\s*(?:include|import|define|undef|INCLUDE|IMPORT|DEFINE|UNDEF)\\b"
+            regex : "#\\s*(?:include|import|define|undef|INCLUDE|IMPORT|DEFINE|UNDEF)\\b",
+            next  : "directive"
         }, {
             token : "keyword", // special case pre-compiler directive
             regex : "#\\s*(?:endif|ifdef|else|elseif|ifndef|ENDIF|IFDEF|ELSE|ELSEIF|IFNDEF)\\b"
@@ -352,7 +353,6 @@ var Range = require("../range").Range;
 var Mode = function() {
     this.HighlightRules = FortranHighlightRules;
     this.foldingRules = new CStyleFoldMode();
-    this.$behaviour = this.$defaultBehaviour;
 };
 oop.inherits(Mode, TextMode);
 
@@ -371,7 +371,7 @@ oop.inherits(Mode, TextMode);
         }
 
         if (state == "start") {
-            var match = line.match(/^.*[\{\(\[:]\s*$/);
+            var match = line.match(/^.*[\{\(\[\:]\s*$/);
             if (match) {
                 indent += tab;
             }

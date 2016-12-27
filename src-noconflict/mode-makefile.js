@@ -53,7 +53,7 @@ var ShHighlightRules = function() {
             token : ["text", "comment"],
             regex : /(^|\s)(#.*)$/
         }, {
-            token : "string.start",
+            token : "string",
             regex : '"',
             push : [{
                 token : "constant.language.escape",
@@ -64,7 +64,7 @@ var ShHighlightRules = function() {
                 token : "keyword.operator",
                 regex : /`/ // TODO highlight `
             }, {
-                token : "string.end",
+                token : "string",
                 regex : '"',
                 next: "pop"
             }, {
@@ -388,7 +388,6 @@ var FoldMode = require("./folding/coffee").FoldMode;
 var Mode = function() {
     this.HighlightRules = MakefileHighlightRules;
     this.foldingRules = new FoldMode();
-    this.$behaviour = this.$defaultBehaviour;
 };
 oop.inherits(Mode, TextMode);
 

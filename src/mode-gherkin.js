@@ -118,7 +118,6 @@ var GherkinHighlightRules = require("./gherkin_highlight_rules").GherkinHighligh
 
 var Mode = function() {
     this.HighlightRules = GherkinHighlightRules;
-    this.$behaviour = this.$defaultBehaviour;
 };
 oop.inherits(Mode, TextMode);
 
@@ -145,7 +144,7 @@ oop.inherits(Mode, TextMode);
         
 
         if (state == "start") {
-            if (line.match("Scenario:|Feature:|Scenario Outline:|Background:")) {
+            if (line.match("Scenario:|Feature:|Scenario\ Outline:|Background:")) {
                 indent += space2;
             } else if(line.match("(Given|Then).+(:)$|Examples:")) {
                 indent += space2;

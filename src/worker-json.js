@@ -913,7 +913,7 @@ var Document = function(textOrLines) {
         return this.removeFullLines(firstRow, lastRow);
     };
     this.insertNewLine = function(position) {
-        console.warn("Use of document.insertNewLine is deprecated. Use insertMergedLines(position, ['', '']) instead.");
+        console.warn("Use of document.insertNewLine is deprecated. Use insertMergedLines(position, [\'\', \'\']) instead.");
         return this.insertMergedLines(position, ["", ""]);
     };
     this.insert = function(position, text) {
@@ -1202,7 +1202,7 @@ exports.copyArray = function(array){
     var copy = [];
     for (var i=0, l=array.length; i<l; i++) {
         if (array[i] && typeof array[i] == "object")
-            copy[i] = this.copyObject(array[i]);
+            copy[i] = this.copyObject( array[i] );
         else 
             copy[i] = array[i];
     }
@@ -1220,12 +1220,14 @@ exports.deepCopy = function deepCopy(obj) {
         }
         return copy;
     }
-    if (Object.prototype.toString.call(obj) !== "[object Object]")
+    var cons = obj.constructor;
+    if (cons === RegExp)
         return obj;
     
-    copy = {};
-    for (var key in obj)
+    copy = cons();
+    for (var key in obj) {
         copy[key] = deepCopy(obj[key]);
+    }
     return copy;
 };
 
@@ -1406,290 +1408,2027 @@ var Mirror = exports.Mirror = function(sender) {
 
 });
 
-define("ace/mode/json/json_parse",["require","exports","module"], function(require, exports, module) {
-"use strict";
+define("ace/mode/json/json",["require","exports","module"], function (require, exports) {
+'use strict';
+function localize(info, message) {
+    var args = [];
+    for (var _i = 2; _i < arguments.length; _i++) {
+        args[_i - 2] = arguments[_i];
+    }
+    return message.replace(/{(\d+)}/g, function (match, number) { return typeof args[number] !== 'undefined' ? args[number] : match; });
+}   
 
-    var at,     // The index of the current character
-        ch,     // The current character
-        escapee = {
-            '"':  '"',
-            '\\': '\\',
-            '/':  '/',
-            b:    '\b',
-            f:    '\f',
-            n:    '\n',
-            r:    '\r',
-            t:    '\t'
-        },
-        text,
-
-        error = function (m) {
-
-            throw {
-                name:    'SyntaxError',
-                message: m,
-                at:      at,
-                text:    text
-            };
-        },
-
-        next = function (c) {
-
-            if (c && c !== ch) {
-                error("Expected '" + c + "' instead of '" + ch + "'");
+(function (ScanError) {
+    ScanError[ScanError["None"] = 0] = "None";
+    ScanError[ScanError["UnexpectedEndOfComment"] = 1] = "UnexpectedEndOfComment";
+    ScanError[ScanError["UnexpectedEndOfString"] = 2] = "UnexpectedEndOfString";
+    ScanError[ScanError["UnexpectedEndOfNumber"] = 3] = "UnexpectedEndOfNumber";
+    ScanError[ScanError["InvalidUnicode"] = 4] = "InvalidUnicode";
+    ScanError[ScanError["InvalidEscapeCharacter"] = 5] = "InvalidEscapeCharacter";
+})(exports.ScanError || (exports.ScanError = {}));
+var ScanError = exports.ScanError;
+(function (SyntaxKind) {
+    SyntaxKind[SyntaxKind["Unknown"] = 0] = "Unknown";
+    SyntaxKind[SyntaxKind["OpenBraceToken"] = 1] = "OpenBraceToken";
+    SyntaxKind[SyntaxKind["CloseBraceToken"] = 2] = "CloseBraceToken";
+    SyntaxKind[SyntaxKind["OpenBracketToken"] = 3] = "OpenBracketToken";
+    SyntaxKind[SyntaxKind["CloseBracketToken"] = 4] = "CloseBracketToken";
+    SyntaxKind[SyntaxKind["CommaToken"] = 5] = "CommaToken";
+    SyntaxKind[SyntaxKind["ColonToken"] = 6] = "ColonToken";
+    SyntaxKind[SyntaxKind["NullKeyword"] = 7] = "NullKeyword";
+    SyntaxKind[SyntaxKind["TrueKeyword"] = 8] = "TrueKeyword";
+    SyntaxKind[SyntaxKind["FalseKeyword"] = 9] = "FalseKeyword";
+    SyntaxKind[SyntaxKind["StringLiteral"] = 10] = "StringLiteral";
+    SyntaxKind[SyntaxKind["NumericLiteral"] = 11] = "NumericLiteral";
+    SyntaxKind[SyntaxKind["LineCommentTrivia"] = 12] = "LineCommentTrivia";
+    SyntaxKind[SyntaxKind["BlockCommentTrivia"] = 13] = "BlockCommentTrivia";
+    SyntaxKind[SyntaxKind["LineBreakTrivia"] = 14] = "LineBreakTrivia";
+    SyntaxKind[SyntaxKind["Trivia"] = 15] = "Trivia";
+    SyntaxKind[SyntaxKind["EOF"] = 16] = "EOF";
+})(exports.SyntaxKind || (exports.SyntaxKind = {}));
+var SyntaxKind = exports.SyntaxKind;
+function createScanner(text, ignoreTrivia) {
+    if (ignoreTrivia === void 0) { ignoreTrivia = false; }
+    var pos = 0, len = text.length, value = '', tokenOffset = 0, token = SyntaxKind.Unknown, scanError = ScanError.None;
+    function scanHexDigits(count, exact) {
+        var digits = 0;
+        var value = 0;
+        while (digits < count || !exact) {
+            var ch = text.charCodeAt(pos);
+            if (ch >= CharacterCodes._0 && ch <= CharacterCodes._9) {
+                value = value * 16 + ch - CharacterCodes._0;
             }
-
-            ch = text.charAt(at);
-            at += 1;
-            return ch;
-        },
-
-        number = function () {
-
-            var number,
-                string = '';
-
-            if (ch === '-') {
-                string = '-';
-                next('-');
+            else if (ch >= CharacterCodes.A && ch <= CharacterCodes.F) {
+                value = value * 16 + ch - CharacterCodes.A + 10;
             }
-            while (ch >= '0' && ch <= '9') {
-                string += ch;
-                next();
+            else if (ch >= CharacterCodes.a && ch <= CharacterCodes.f) {
+                value = value * 16 + ch - CharacterCodes.a + 10;
             }
-            if (ch === '.') {
-                string += '.';
-                while (next() && ch >= '0' && ch <= '9') {
-                    string += ch;
+            else {
+                break;
+            }
+            pos++;
+            digits++;
+        }
+        if (digits < count) {
+            value = -1;
+        }
+        return value;
+    }
+    function scanNumber() {
+        var start = pos;
+        if (text.charCodeAt(pos) === CharacterCodes._0) {
+            pos++;
+        }
+        else {
+            pos++;
+            while (pos < text.length && isDigit(text.charCodeAt(pos))) {
+                pos++;
+            }
+        }
+        if (pos < text.length && text.charCodeAt(pos) === CharacterCodes.dot) {
+            pos++;
+            if (pos < text.length && isDigit(text.charCodeAt(pos))) {
+                pos++;
+                while (pos < text.length && isDigit(text.charCodeAt(pos))) {
+                    pos++;
                 }
             }
-            if (ch === 'e' || ch === 'E') {
-                string += ch;
-                next();
-                if (ch === '-' || ch === '+') {
-                    string += ch;
-                    next();
-                }
-                while (ch >= '0' && ch <= '9') {
-                    string += ch;
-                    next();
-                }
+            else {
+                scanError = ScanError.UnexpectedEndOfNumber;
+                return text.substring(start, end);
             }
-            number = +string;
-            if (isNaN(number)) {
-                error("Bad number");
-            } else {
-                return number;
+        }
+        var end = pos;
+        if (pos < text.length && (text.charCodeAt(pos) === CharacterCodes.E || text.charCodeAt(pos) === CharacterCodes.e)) {
+            pos++;
+            if (pos < text.length && text.charCodeAt(pos) === CharacterCodes.plus || text.charCodeAt(pos) === CharacterCodes.minus) {
+                pos++;
             }
-        },
-
-        string = function () {
-
-            var hex,
-                i,
-                string = '',
-                uffff;
-
-            if (ch === '"') {
-                while (next()) {
-                    if (ch === '"') {
-                        next();
-                        return string;
-                    } else if (ch === '\\') {
-                        next();
-                        if (ch === 'u') {
-                            uffff = 0;
-                            for (i = 0; i < 4; i += 1) {
-                                hex = parseInt(next(), 16);
-                                if (!isFinite(hex)) {
-                                    break;
-                                }
-                                uffff = uffff * 16 + hex;
-                            }
-                            string += String.fromCharCode(uffff);
-                        } else if (typeof escapee[ch] === 'string') {
-                            string += escapee[ch];
-                        } else {
+            if (pos < text.length && isDigit(text.charCodeAt(pos))) {
+                pos++;
+                while (pos < text.length && isDigit(text.charCodeAt(pos))) {
+                    pos++;
+                }
+                end = pos;
+            }
+            else {
+                scanError = ScanError.UnexpectedEndOfNumber;
+            }
+        }
+        return text.substring(start, end);
+    }
+    function scanString() {
+        var result = '', start = pos;
+        while (true) {
+            if (pos >= len) {
+                result += text.substring(start, pos);
+                scanError = ScanError.UnexpectedEndOfString;
+                break;
+            }
+            var ch = text.charCodeAt(pos);
+            if (ch === CharacterCodes.doubleQuote) {
+                result += text.substring(start, pos);
+                pos++;
+                break;
+            }
+            if (ch === CharacterCodes.backslash) {
+                result += text.substring(start, pos);
+                pos++;
+                if (pos >= len) {
+                    scanError = ScanError.UnexpectedEndOfString;
+                    break;
+                }
+                ch = text.charCodeAt(pos++);
+                switch (ch) {
+                    case CharacterCodes.doubleQuote:
+                        result += '\"';
+                        break;
+                    case CharacterCodes.backslash:
+                        result += '\\';
+                        break;
+                    case CharacterCodes.slash:
+                        result += '/';
+                        break;
+                    case CharacterCodes.b:
+                        result += '\b';
+                        break;
+                    case CharacterCodes.f:
+                        result += '\f';
+                        break;
+                    case CharacterCodes.n:
+                        result += '\n';
+                        break;
+                    case CharacterCodes.r:
+                        result += '\r';
+                        break;
+                    case CharacterCodes.t:
+                        result += '\t';
+                        break;
+                    case CharacterCodes.u:
+                        var ch = scanHexDigits(4, true);
+                        if (ch >= 0) {
+                            result += String.fromCharCode(ch);
+                        }
+                        else {
+                            scanError = ScanError.InvalidUnicode;
+                        }
+                        break;
+                    default:
+                        scanError = ScanError.InvalidEscapeCharacter;
+                }
+                start = pos;
+                continue;
+            }
+            if (isLineBreak(ch)) {
+                result += text.substring(start, pos);
+                scanError = ScanError.UnexpectedEndOfString;
+                break;
+            }
+            pos++;
+        }
+        return result;
+    }
+    function scanNext() {
+        value = '';
+        scanError = ScanError.None;
+        tokenOffset = pos;
+        if (pos >= len) {
+            tokenOffset = len;
+            return token = SyntaxKind.EOF;
+        }
+        var code = text.charCodeAt(pos);
+        if (isWhiteSpace(code)) {
+            do {
+                pos++;
+                value += String.fromCharCode(code);
+                code = text.charCodeAt(pos);
+            } while (isWhiteSpace(code));
+            return token = SyntaxKind.Trivia;
+        }
+        if (isLineBreak(code)) {
+            pos++;
+            value += String.fromCharCode(code);
+            if (code === CharacterCodes.carriageReturn && text.charCodeAt(pos) === CharacterCodes.lineFeed) {
+                pos++;
+                value += '\n';
+            }
+            return token = SyntaxKind.LineBreakTrivia;
+        }
+        switch (code) {
+            case CharacterCodes.openBrace:
+                pos++;
+                return token = SyntaxKind.OpenBraceToken;
+            case CharacterCodes.closeBrace:
+                pos++;
+                return token = SyntaxKind.CloseBraceToken;
+            case CharacterCodes.openBracket:
+                pos++;
+                return token = SyntaxKind.OpenBracketToken;
+            case CharacterCodes.closeBracket:
+                pos++;
+                return token = SyntaxKind.CloseBracketToken;
+            case CharacterCodes.colon:
+                pos++;
+                return token = SyntaxKind.ColonToken;
+            case CharacterCodes.comma:
+                pos++;
+                return token = SyntaxKind.CommaToken;
+            case CharacterCodes.doubleQuote:
+                pos++;
+                value = scanString();
+                return token = SyntaxKind.StringLiteral;
+            case CharacterCodes.slash:
+                var start = pos - 1;
+                if (text.charCodeAt(pos + 1) === CharacterCodes.slash) {
+                    pos += 2;
+                    while (pos < len) {
+                        if (isLineBreak(text.charCodeAt(pos))) {
                             break;
                         }
-                    } else {
-                        string += ch;
+                        pos++;
                     }
+                    value = text.substring(start, pos);
+                    return token = SyntaxKind.LineCommentTrivia;
                 }
-            }
-            error("Bad string");
-        },
-
-        white = function () {
-
-            while (ch && ch <= ' ') {
-                next();
-            }
-        },
-
-        word = function () {
-
-            switch (ch) {
-            case 't':
-                next('t');
-                next('r');
-                next('u');
-                next('e');
-                return true;
-            case 'f':
-                next('f');
-                next('a');
-                next('l');
-                next('s');
-                next('e');
+                if (text.charCodeAt(pos + 1) === CharacterCodes.asterisk) {
+                    pos += 2;
+                    var safeLength = len - 1; // For lookahead.
+                    var commentClosed = false;
+                    while (pos < safeLength) {
+                        var ch = text.charCodeAt(pos);
+                        if (ch === CharacterCodes.asterisk && text.charCodeAt(pos + 1) === CharacterCodes.slash) {
+                            pos += 2;
+                            commentClosed = true;
+                            break;
+                        }
+                        pos++;
+                    }
+                    if (!commentClosed) {
+                        pos++;
+                        scanError = ScanError.UnexpectedEndOfComment;
+                    }
+                    value = text.substring(start, pos);
+                    return token = SyntaxKind.BlockCommentTrivia;
+                }
+                value += String.fromCharCode(code);
+                pos++;
+                return token = SyntaxKind.Unknown;
+            case CharacterCodes.minus:
+                value += String.fromCharCode(code);
+                pos++;
+                if (pos === len || !isDigit(text.charCodeAt(pos))) {
+                    return token = SyntaxKind.Unknown;
+                }
+            case CharacterCodes._0:
+            case CharacterCodes._1:
+            case CharacterCodes._2:
+            case CharacterCodes._3:
+            case CharacterCodes._4:
+            case CharacterCodes._5:
+            case CharacterCodes._6:
+            case CharacterCodes._7:
+            case CharacterCodes._8:
+            case CharacterCodes._9:
+                value += scanNumber();
+                return token = SyntaxKind.NumericLiteral;
+            default:
+                while (pos < len && isUnknownContentCharacter(code)) {
+                    pos++;
+                    code = text.charCodeAt(pos);
+                }
+                if (tokenOffset !== pos) {
+                    value = text.substring(tokenOffset, pos);
+                    switch (value) {
+                        case 'true': return token = SyntaxKind.TrueKeyword;
+                        case 'false': return token = SyntaxKind.FalseKeyword;
+                        case 'null': return token = SyntaxKind.NullKeyword;
+                    }
+                    return token = SyntaxKind.Unknown;
+                }
+                value += String.fromCharCode(code);
+                pos++;
+                return token = SyntaxKind.Unknown;
+        }
+    }
+    function isUnknownContentCharacter(code) {
+        if (isWhiteSpace(code) || isLineBreak(code)) {
+            return false;
+        }
+        switch (code) {
+            case CharacterCodes.closeBrace:
+            case CharacterCodes.closeBracket:
+            case CharacterCodes.openBrace:
+            case CharacterCodes.openBracket:
+            case CharacterCodes.doubleQuote:
+            case CharacterCodes.colon:
+            case CharacterCodes.comma:
                 return false;
-            case 'n':
-                next('n');
-                next('u');
-                next('l');
-                next('l');
-                return null;
-            }
-            error("Unexpected '" + ch + "'");
-        },
-
-        value,  // Place holder for the value function.
-
-        array = function () {
-
-            var array = [];
-
-            if (ch === '[') {
-                next('[');
-                white();
-                if (ch === ']') {
-                    next(']');
-                    return array;   // empty array
-                }
-                while (ch) {
-                    array.push(value());
-                    white();
-                    if (ch === ']') {
-                        next(']');
-                        return array;
-                    }
-                    next(',');
-                    white();
-                }
-            }
-            error("Bad array");
-        },
-
-        object = function () {
-
-            var key,
-                object = {};
-
-            if (ch === '{') {
-                next('{');
-                white();
-                if (ch === '}') {
-                    next('}');
-                    return object;   // empty object
-                }
-                while (ch) {
-                    key = string();
-                    white();
-                    next(':');
-                    if (Object.hasOwnProperty.call(object, key)) {
-                        error('Duplicate key "' + key + '"');
-                    }
-                    object[key] = value();
-                    white();
-                    if (ch === '}') {
-                        next('}');
-                        return object;
-                    }
-                    next(',');
-                    white();
-                }
-            }
-            error("Bad object");
-        };
-
-    value = function () {
-
-        white();
-        switch (ch) {
-        case '{':
-            return object();
-        case '[':
-            return array();
-        case '"':
-            return string();
-        case '-':
-            return number();
-        default:
-            return ch >= '0' && ch <= '9' ? number() : word();
         }
-    };
-
-    return function (source, reviver) {
+        return true;
+    }
+    function scanNextNonTrivia() {
         var result;
-
-        text = source;
-        at = 0;
-        ch = ' ';
-        result = value();
-        white();
-        if (ch) {
-            error("Syntax error");
+        do {
+            result = scanNext();
+        } while (result >= SyntaxKind.LineCommentTrivia && result <= SyntaxKind.Trivia);
+        return result;
+    }
+    return {
+        getPosition: function () { return pos; },
+        scan: ignoreTrivia ? scanNextNonTrivia : scanNext,
+        getToken: function () { return token; },
+        getTokenValue: function () { return value; },
+        getTokenOffset: function () { return tokenOffset; },
+        getTokenLength: function () { return pos - tokenOffset; },
+        getTokenError: function () { return scanError; }
+    };
+}
+exports.createScanner = createScanner;
+function isWhiteSpace(ch) {
+    return ch === CharacterCodes.space || ch === CharacterCodes.tab || ch === CharacterCodes.verticalTab || ch === CharacterCodes.formFeed ||
+        ch === CharacterCodes.nonBreakingSpace || ch === CharacterCodes.ogham || ch >= CharacterCodes.enQuad && ch <= CharacterCodes.zeroWidthSpace ||
+        ch === CharacterCodes.narrowNoBreakSpace || ch === CharacterCodes.mathematicalSpace || ch === CharacterCodes.ideographicSpace || ch === CharacterCodes.byteOrderMark;
+}
+function isLineBreak(ch) {
+    return ch === CharacterCodes.lineFeed || ch === CharacterCodes.carriageReturn || ch === CharacterCodes.lineSeparator || ch === CharacterCodes.paragraphSeparator;
+}
+function isDigit(ch) {
+    return ch >= CharacterCodes._0 && ch <= CharacterCodes._9;
+}
+function isLetter(ch) {
+    return ch >= CharacterCodes.a && ch <= CharacterCodes.z || ch >= CharacterCodes.A && ch <= CharacterCodes.Z;
+}
+exports.isLetter = isLetter;
+var CharacterCodes;
+(function (CharacterCodes) {
+    CharacterCodes[CharacterCodes["nullCharacter"] = 0] = "nullCharacter";
+    CharacterCodes[CharacterCodes["maxAsciiCharacter"] = 127] = "maxAsciiCharacter";
+    CharacterCodes[CharacterCodes["lineFeed"] = 10] = "lineFeed";
+    CharacterCodes[CharacterCodes["carriageReturn"] = 13] = "carriageReturn";
+    CharacterCodes[CharacterCodes["lineSeparator"] = 8232] = "lineSeparator";
+    CharacterCodes[CharacterCodes["paragraphSeparator"] = 8233] = "paragraphSeparator";
+    CharacterCodes[CharacterCodes["nextLine"] = 133] = "nextLine";
+    CharacterCodes[CharacterCodes["space"] = 32] = "space";
+    CharacterCodes[CharacterCodes["nonBreakingSpace"] = 160] = "nonBreakingSpace";
+    CharacterCodes[CharacterCodes["enQuad"] = 8192] = "enQuad";
+    CharacterCodes[CharacterCodes["emQuad"] = 8193] = "emQuad";
+    CharacterCodes[CharacterCodes["enSpace"] = 8194] = "enSpace";
+    CharacterCodes[CharacterCodes["emSpace"] = 8195] = "emSpace";
+    CharacterCodes[CharacterCodes["threePerEmSpace"] = 8196] = "threePerEmSpace";
+    CharacterCodes[CharacterCodes["fourPerEmSpace"] = 8197] = "fourPerEmSpace";
+    CharacterCodes[CharacterCodes["sixPerEmSpace"] = 8198] = "sixPerEmSpace";
+    CharacterCodes[CharacterCodes["figureSpace"] = 8199] = "figureSpace";
+    CharacterCodes[CharacterCodes["punctuationSpace"] = 8200] = "punctuationSpace";
+    CharacterCodes[CharacterCodes["thinSpace"] = 8201] = "thinSpace";
+    CharacterCodes[CharacterCodes["hairSpace"] = 8202] = "hairSpace";
+    CharacterCodes[CharacterCodes["zeroWidthSpace"] = 8203] = "zeroWidthSpace";
+    CharacterCodes[CharacterCodes["narrowNoBreakSpace"] = 8239] = "narrowNoBreakSpace";
+    CharacterCodes[CharacterCodes["ideographicSpace"] = 12288] = "ideographicSpace";
+    CharacterCodes[CharacterCodes["mathematicalSpace"] = 8287] = "mathematicalSpace";
+    CharacterCodes[CharacterCodes["ogham"] = 5760] = "ogham";
+    CharacterCodes[CharacterCodes["_"] = 95] = "_";
+    CharacterCodes[CharacterCodes["$"] = 36] = "$";
+    CharacterCodes[CharacterCodes["_0"] = 48] = "_0";
+    CharacterCodes[CharacterCodes["_1"] = 49] = "_1";
+    CharacterCodes[CharacterCodes["_2"] = 50] = "_2";
+    CharacterCodes[CharacterCodes["_3"] = 51] = "_3";
+    CharacterCodes[CharacterCodes["_4"] = 52] = "_4";
+    CharacterCodes[CharacterCodes["_5"] = 53] = "_5";
+    CharacterCodes[CharacterCodes["_6"] = 54] = "_6";
+    CharacterCodes[CharacterCodes["_7"] = 55] = "_7";
+    CharacterCodes[CharacterCodes["_8"] = 56] = "_8";
+    CharacterCodes[CharacterCodes["_9"] = 57] = "_9";
+    CharacterCodes[CharacterCodes["a"] = 97] = "a";
+    CharacterCodes[CharacterCodes["b"] = 98] = "b";
+    CharacterCodes[CharacterCodes["c"] = 99] = "c";
+    CharacterCodes[CharacterCodes["d"] = 100] = "d";
+    CharacterCodes[CharacterCodes["e"] = 101] = "e";
+    CharacterCodes[CharacterCodes["f"] = 102] = "f";
+    CharacterCodes[CharacterCodes["g"] = 103] = "g";
+    CharacterCodes[CharacterCodes["h"] = 104] = "h";
+    CharacterCodes[CharacterCodes["i"] = 105] = "i";
+    CharacterCodes[CharacterCodes["j"] = 106] = "j";
+    CharacterCodes[CharacterCodes["k"] = 107] = "k";
+    CharacterCodes[CharacterCodes["l"] = 108] = "l";
+    CharacterCodes[CharacterCodes["m"] = 109] = "m";
+    CharacterCodes[CharacterCodes["n"] = 110] = "n";
+    CharacterCodes[CharacterCodes["o"] = 111] = "o";
+    CharacterCodes[CharacterCodes["p"] = 112] = "p";
+    CharacterCodes[CharacterCodes["q"] = 113] = "q";
+    CharacterCodes[CharacterCodes["r"] = 114] = "r";
+    CharacterCodes[CharacterCodes["s"] = 115] = "s";
+    CharacterCodes[CharacterCodes["t"] = 116] = "t";
+    CharacterCodes[CharacterCodes["u"] = 117] = "u";
+    CharacterCodes[CharacterCodes["v"] = 118] = "v";
+    CharacterCodes[CharacterCodes["w"] = 119] = "w";
+    CharacterCodes[CharacterCodes["x"] = 120] = "x";
+    CharacterCodes[CharacterCodes["y"] = 121] = "y";
+    CharacterCodes[CharacterCodes["z"] = 122] = "z";
+    CharacterCodes[CharacterCodes["A"] = 65] = "A";
+    CharacterCodes[CharacterCodes["B"] = 66] = "B";
+    CharacterCodes[CharacterCodes["C"] = 67] = "C";
+    CharacterCodes[CharacterCodes["D"] = 68] = "D";
+    CharacterCodes[CharacterCodes["E"] = 69] = "E";
+    CharacterCodes[CharacterCodes["F"] = 70] = "F";
+    CharacterCodes[CharacterCodes["G"] = 71] = "G";
+    CharacterCodes[CharacterCodes["H"] = 72] = "H";
+    CharacterCodes[CharacterCodes["I"] = 73] = "I";
+    CharacterCodes[CharacterCodes["J"] = 74] = "J";
+    CharacterCodes[CharacterCodes["K"] = 75] = "K";
+    CharacterCodes[CharacterCodes["L"] = 76] = "L";
+    CharacterCodes[CharacterCodes["M"] = 77] = "M";
+    CharacterCodes[CharacterCodes["N"] = 78] = "N";
+    CharacterCodes[CharacterCodes["O"] = 79] = "O";
+    CharacterCodes[CharacterCodes["P"] = 80] = "P";
+    CharacterCodes[CharacterCodes["Q"] = 81] = "Q";
+    CharacterCodes[CharacterCodes["R"] = 82] = "R";
+    CharacterCodes[CharacterCodes["S"] = 83] = "S";
+    CharacterCodes[CharacterCodes["T"] = 84] = "T";
+    CharacterCodes[CharacterCodes["U"] = 85] = "U";
+    CharacterCodes[CharacterCodes["V"] = 86] = "V";
+    CharacterCodes[CharacterCodes["W"] = 87] = "W";
+    CharacterCodes[CharacterCodes["X"] = 88] = "X";
+    CharacterCodes[CharacterCodes["Y"] = 89] = "Y";
+    CharacterCodes[CharacterCodes["Z"] = 90] = "Z";
+    CharacterCodes[CharacterCodes["ampersand"] = 38] = "ampersand";
+    CharacterCodes[CharacterCodes["asterisk"] = 42] = "asterisk";
+    CharacterCodes[CharacterCodes["at"] = 64] = "at";
+    CharacterCodes[CharacterCodes["backslash"] = 92] = "backslash";
+    CharacterCodes[CharacterCodes["bar"] = 124] = "bar";
+    CharacterCodes[CharacterCodes["caret"] = 94] = "caret";
+    CharacterCodes[CharacterCodes["closeBrace"] = 125] = "closeBrace";
+    CharacterCodes[CharacterCodes["closeBracket"] = 93] = "closeBracket";
+    CharacterCodes[CharacterCodes["closeParen"] = 41] = "closeParen";
+    CharacterCodes[CharacterCodes["colon"] = 58] = "colon";
+    CharacterCodes[CharacterCodes["comma"] = 44] = "comma";
+    CharacterCodes[CharacterCodes["dot"] = 46] = "dot";
+    CharacterCodes[CharacterCodes["doubleQuote"] = 34] = "doubleQuote";
+    CharacterCodes[CharacterCodes["equals"] = 61] = "equals";
+    CharacterCodes[CharacterCodes["exclamation"] = 33] = "exclamation";
+    CharacterCodes[CharacterCodes["greaterThan"] = 62] = "greaterThan";
+    CharacterCodes[CharacterCodes["lessThan"] = 60] = "lessThan";
+    CharacterCodes[CharacterCodes["minus"] = 45] = "minus";
+    CharacterCodes[CharacterCodes["openBrace"] = 123] = "openBrace";
+    CharacterCodes[CharacterCodes["openBracket"] = 91] = "openBracket";
+    CharacterCodes[CharacterCodes["openParen"] = 40] = "openParen";
+    CharacterCodes[CharacterCodes["percent"] = 37] = "percent";
+    CharacterCodes[CharacterCodes["plus"] = 43] = "plus";
+    CharacterCodes[CharacterCodes["question"] = 63] = "question";
+    CharacterCodes[CharacterCodes["semicolon"] = 59] = "semicolon";
+    CharacterCodes[CharacterCodes["singleQuote"] = 39] = "singleQuote";
+    CharacterCodes[CharacterCodes["slash"] = 47] = "slash";
+    CharacterCodes[CharacterCodes["tilde"] = 126] = "tilde";
+    CharacterCodes[CharacterCodes["backspace"] = 8] = "backspace";
+    CharacterCodes[CharacterCodes["formFeed"] = 12] = "formFeed";
+    CharacterCodes[CharacterCodes["byteOrderMark"] = 65279] = "byteOrderMark";
+    CharacterCodes[CharacterCodes["tab"] = 9] = "tab";
+    CharacterCodes[CharacterCodes["verticalTab"] = 11] = "verticalTab";
+})(CharacterCodes || (CharacterCodes = {}));
+function stripComments(text, replaceCh) {
+    var _scanner = createScanner(text), parts = [], kind, offset = 0, pos;
+    do {
+        pos = _scanner.getPosition();
+        kind = _scanner.scan();
+        switch (kind) {
+            case SyntaxKind.LineCommentTrivia:
+            case SyntaxKind.BlockCommentTrivia:
+            case SyntaxKind.EOF:
+                if (offset !== pos) {
+                    parts.push(text.substring(offset, pos));
+                }
+                if (replaceCh !== void 0) {
+                    parts.push(_scanner.getTokenValue().replace(/[^\r\n]/g, replaceCh));
+                }
+                offset = _scanner.getPosition();
+                break;
         }
+    } while (kind !== SyntaxKind.EOF);
+    return parts.join('');
+}
+exports.stripComments = stripComments;
+function parse(text, errors) {
+    if (errors === void 0) { errors = []; }
+    var noMatch = Object();
+    var _scanner = createScanner(text, true);
+    function scanNext() {
+        var token = _scanner.scan();
+        while (token === SyntaxKind.Unknown) {
+            handleError(localize('UnknownSymbol', 'Invalid symbol'));
+            token = _scanner.scan();
+        }
+        return token;
+    }
+    function handleError(message, skipUntilAfter, skipUntil) {
+        if (skipUntilAfter === void 0) { skipUntilAfter = []; }
+        if (skipUntil === void 0) { skipUntil = []; }
+        errors.push(message);
+        if (skipUntilAfter.length + skipUntil.length > 0) {
+            var token = _scanner.getToken();
+            while (token !== SyntaxKind.EOF) {
+                if (skipUntilAfter.indexOf(token) !== -1) {
+                    scanNext();
+                    break;
+                }
+                else if (skipUntil.indexOf(token) !== -1) {
+                    break;
+                }
+                token = scanNext();
+            }
+        }
+    }
+    function parseString() {
+        if (_scanner.getToken() !== SyntaxKind.StringLiteral) {
+            return noMatch;
+        }
+        var value = _scanner.getTokenValue();
+        scanNext();
+        return value;
+    }
+    function parseLiteral() {
+        var value;
+        switch (_scanner.getToken()) {
+            case SyntaxKind.NumericLiteral:
+                try {
+                    value = JSON.parse(_scanner.getTokenValue());
+                    if (typeof value !== 'number') {
+                        handleError(localize('InvalidNumberFormat', 'Invalid number format'));
+                        value = 0;
+                    }
+                }
+                catch (e) {
+                    value = 0;
+                }
+                break;
+            case SyntaxKind.NullKeyword:
+                value = null;
+                break;
+            case SyntaxKind.TrueKeyword:
+                value = true;
+                break;
+            case SyntaxKind.FalseKeyword:
+                value = false;
+                break;
+            default:
+                return noMatch;
+        }
+        scanNext();
+        return value;
+    }
+    function parseProperty(result) {
+        var key = parseString();
+        if (key === noMatch) {
+            handleError(localize('PropertyExpected', 'Property name expected'), [], [SyntaxKind.CloseBraceToken, SyntaxKind.CommaToken]);
+            return false;
+        }
+        if (_scanner.getToken() === SyntaxKind.ColonToken) {
+            scanNext(); // consume colon
+            var value = parseValue();
+            if (value !== noMatch) {
+                result[key] = value;
+            }
+            else {
+                handleError(localize('ValueExpected', 'Value expected'), [], [SyntaxKind.CloseBraceToken, SyntaxKind.CommaToken]);
+            }
+        }
+        else {
+            handleError(localize('ColonExpected', 'Colon expected'), [], [SyntaxKind.CloseBraceToken, SyntaxKind.CommaToken]);
+        }
+        return true;
+    }
+    function parseObject() {
+        if (_scanner.getToken() !== SyntaxKind.OpenBraceToken) {
+            return noMatch;
+        }
+        var obj = {};
+        scanNext(); // consume open brace
+        var needsComma = false;
+        while (_scanner.getToken() !== SyntaxKind.CloseBraceToken && _scanner.getToken() !== SyntaxKind.EOF) {
+            if (_scanner.getToken() === SyntaxKind.CommaToken) {
+                if (!needsComma) {
+                    handleError(localize('ValeExpected', 'Value expected'), [], []);
+                }
+                scanNext(); // consume comma
+            }
+            else if (needsComma) {
+                handleError(localize('CommaExpected', 'Comma expected'), [], []);
+            }
+            var propertyParsed = parseProperty(obj);
+            if (!propertyParsed) {
+                handleError(localize('ValueExpected', 'Value expected'), [], [SyntaxKind.CloseBraceToken, SyntaxKind.CommaToken]);
+            }
+            needsComma = true;
+        }
+        if (_scanner.getToken() !== SyntaxKind.CloseBraceToken) {
+            handleError(localize('CloseBraceExpected', 'Closing brace expected'), [SyntaxKind.CloseBraceToken], []);
+        }
+        else {
+            scanNext(); // consume close brace
+        }
+        return obj;
+    }
+    function parseArray() {
+        if (_scanner.getToken() !== SyntaxKind.OpenBracketToken) {
+            return noMatch;
+        }
+        var arr = [];
+        scanNext(); // consume open bracket
+        var needsComma = false;
+        while (_scanner.getToken() !== SyntaxKind.CloseBracketToken && _scanner.getToken() !== SyntaxKind.EOF) {
+            if (_scanner.getToken() === SyntaxKind.CommaToken) {
+                if (!needsComma) {
+                    handleError(localize('ValueExpected', 'Value expected'), [], []);
+                }
+                scanNext(); // consume comma
+            }
+            else if (needsComma) {
+                handleError(localize('CommaExpected', 'Comma expected'), [], []);
+            }
+            var value = parseValue();
+            if (value === noMatch) {
+                handleError(localize('ValueExpected', 'Value expected'), [], [SyntaxKind.CloseBracketToken, SyntaxKind.CommaToken]);
+            }
+            else {
+                arr.push(value);
+            }
+            needsComma = true;
+        }
+        if (_scanner.getToken() !== SyntaxKind.CloseBracketToken) {
+            handleError(localize('CloseBracketExpected', 'Closing bracket expected'), [SyntaxKind.CloseBracketToken], []);
+        }
+        else {
+            scanNext(); // consume close bracket
+        }
+        return arr;
+    }
+    function parseValue() {
+        var result = parseArray();
+        if (result !== noMatch) {
+            return result;
+        }
+        result = parseObject();
+        if (result !== noMatch) {
+            return result;
+        }
+        result = parseString();
+        if (result !== noMatch) {
+            return result;
+        }
+        return parseLiteral();
+    }
+    scanNext();
+    var value = parseValue();
+    if (value === noMatch) {
+        handleError(localize('ValueExpected', 'Value expected'), [], []);
+        return void 0;
+    }
+    if (_scanner.getToken() !== SyntaxKind.EOF) {
+        handleError(localize('EOFExpected', 'End of content expected'), [], []);
+    }
+    return value;
+}
+exports.parse = parse;
+});
 
-        return typeof reviver === 'function' ? function walk(holder, key) {
-            var k, v, value = holder[key];
-            if (value && typeof value === 'object') {
-                for (k in value) {
-                    if (Object.hasOwnProperty.call(value, k)) {
-                        v = walk(value, k);
-                        if (v !== undefined) {
-                            value[k] = v;
-                        } else {
-                            delete value[k];
+define("ace/mode/json/jsonLocation",["require","exports","module"], function (require, exports) {
+'use strict';
+var JSONLocation = (function () {
+    function JSONLocation(segments) {
+        this.segments = segments;
+    }
+    JSONLocation.prototype.append = function (segment) {
+        return new JSONLocation(this.segments.concat(segment));
+    };
+    JSONLocation.prototype.getSegments = function () {
+        return this.segments;
+    };
+    JSONLocation.prototype.matches = function (segments) {
+        var k = 0;
+        for (var i = 0; k < segments.length && i < this.segments.length; i++) {
+            if (segments[k] === this.segments[i] || segments[k] === '*') {
+                k++;
+            }
+            else if (segments[k] !== '**') {
+                return false;
+            }
+        }
+        return k === segments.length;
+    };
+    JSONLocation.prototype.toString = function () {
+        return '[' + this.segments.join('][') + ']';
+    };
+    return JSONLocation;
+})();
+exports.JSONLocation = JSONLocation;
+});
+
+var __extends = (this && this.__extends) || function (d, b) {
+    for (var p in b) if (b.hasOwnProperty(p)) d[p] = b[p];
+    function __() { this.constructor = d; }
+    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+};
+
+define("ace/mode/json/jsonParser",["require","exports","module","ace/mode/json/json","ace/mode/json/jsonLocation"], function (require, exports) {
+'use strict';
+
+var Json = require('./json')
+var jsonLocation_1 = require('./jsonLocation')
+
+function isNumber(obj) {
+    if ((typeof (obj) === 'number' || obj instanceof Number) && !isNaN(obj)) {
+        return true;
+    }
+    return false;
+}
+
+function isUndefined(obj) {
+    return typeof (obj) === 'undefined';
+}
+
+function isObject(obj) {
+    if (typeof obj === 'undefined' || obj === null) {
+        return false;
+    }
+    return Object.prototype.toString.call(obj) === '[object Object]';
+}
+
+function contains(array, item) {
+    return array.indexOf(item) >= 0;
+}
+
+function localize(info, message) {
+    var args = [];
+    for (var _i = 2; _i < arguments.length; _i++) {
+        args[_i - 2] = arguments[_i];
+    }
+    return message.replace(/{(\d+)}/g, function (match, number) { return typeof args[number] !== 'undefined' ? args[number] : match; });
+}
+
+var ASTNode = (function () {
+    function ASTNode(parent, type, name, start, end) {
+        this.type = type;
+        this.name = name;
+        this.start = start;
+        this.end = end;
+        this.parent = parent;
+    }
+    ASTNode.prototype.getNodeLocation = function () {
+        var path = this.parent ? this.parent.getNodeLocation() : new jsonLocation_1.JSONLocation([]);
+        if (this.name) {
+            path = path.append(this.name);
+        }
+        return path;
+    };
+    ASTNode.prototype.getChildNodes = function () {
+        return [];
+    };
+    ASTNode.prototype.getValue = function () {
+        return;
+    };
+    ASTNode.prototype.contains = function (offset, includeRightBound) {
+        if (includeRightBound === void 0) { includeRightBound = false; }
+        return offset >= this.start && offset < this.end || includeRightBound && offset === this.end;
+    };
+    ASTNode.prototype.visit = function (visitor) {
+        return visitor(this);
+    };
+    ASTNode.prototype.getNodeFromOffset = function (offset) {
+        var findNode = function (node) {
+            if (offset >= node.start && offset < node.end) {
+                var children = node.getChildNodes();
+                for (var i = 0; i < children.length && children[i].start <= offset; i++) {
+                    var item = findNode(children[i]);
+                    if (item) {
+                        return item;
+                    }
+                }
+                return node;
+            }
+            return null;
+        };
+        return findNode(this);
+    };
+    ASTNode.prototype.getNodeFromOffsetEndInclusive = function (offset) {
+        var findNode = function (node) {
+            if (offset >= node.start && offset <= node.end) {
+                var children = node.getChildNodes();
+                for (var i = 0; i < children.length && children[i].start <= offset; i++) {
+                    var item = findNode(children[i]);
+                    if (item) {
+                        return item;
+                    }
+                }
+                return node;
+            }
+            return null;
+        };
+        return findNode(this);
+    };
+    ASTNode.prototype.validate = function (schema, validationResult, matchingSchemas, offset) {
+        var _this = this;
+        if (offset === void 0) { offset = -1; }
+        if (offset !== -1 && !this.contains(offset)) {
+            return;
+        }
+        if (Array.isArray(schema.type)) {
+            if (contains(schema.type, this.type) === false) {
+                validationResult.warnings.push({
+                    location: { start: this.start, end: this.end },
+                    message: localize('typeArrayMismatchWarning', 'Incorrect type. Expected one of {0}', schema.type.join())
+                });
+            }
+        }
+        else if (schema.type) {
+            if (this.type !== schema.type) {
+                validationResult.warnings.push({
+                    location: { start: this.start, end: this.end },
+                    message: localize('typeMismatchWarning', 'Incorrect type. Expected "{0}"', schema.type)
+                });
+            }
+        }
+        if (Array.isArray(schema.allOf)) {
+            schema.allOf.forEach(function (subSchema) {
+                _this.validate(subSchema, validationResult, matchingSchemas, offset);
+            });
+        }
+        if (schema.not) {
+            var subValidationResult = new ValidationResult();
+            var subMatchingSchemas = [];
+            this.validate(schema.not, subValidationResult, subMatchingSchemas, offset);
+            if (!subValidationResult.hasErrors()) {
+                validationResult.warnings.push({
+                    location: { start: this.start, end: this.end },
+                    message: localize('notSchemaWarning', "Matches a schema that is not allowed.")
+                });
+            }
+            if (matchingSchemas) {
+                subMatchingSchemas.forEach(function (ms) {
+                    ms.inverted = !ms.inverted;
+                    matchingSchemas.push(ms);
+                });
+            }
+        }
+        var testAlternatives = function (alternatives, maxOneMatch) {
+            var matches = [];
+            var bestMatch = null;
+            alternatives.forEach(function (subSchema) {
+                var subValidationResult = new ValidationResult();
+                var subMatchingSchemas = [];
+                _this.validate(subSchema, subValidationResult, subMatchingSchemas);
+                if (!subValidationResult.hasErrors()) {
+                    matches.push(subSchema);
+                }
+                if (!bestMatch) {
+                    bestMatch = { schema: subSchema, validationResult: subValidationResult, matchingSchemas: subMatchingSchemas };
+                }
+                else {
+                    if (!maxOneMatch && !subValidationResult.hasErrors() && !bestMatch.validationResult.hasErrors()) {
+                        bestMatch.matchingSchemas.push.apply(bestMatch.matchingSchemas, subMatchingSchemas);
+                        bestMatch.validationResult.propertiesMatches += subValidationResult.propertiesMatches;
+                        bestMatch.validationResult.propertiesValueMatches += subValidationResult.propertiesValueMatches;
+                    }
+                    else {
+                        var compareResult = subValidationResult.compare(bestMatch.validationResult);
+                        if (compareResult > 0) {
+                            bestMatch = { schema: subSchema, validationResult: subValidationResult, matchingSchemas: subMatchingSchemas };
+                        }
+                        else if (compareResult === 0) {
+                            bestMatch.matchingSchemas.push.apply(bestMatch.matchingSchemas, subMatchingSchemas);
                         }
                     }
                 }
+            });
+            if (matches.length > 1 && maxOneMatch) {
+                validationResult.warnings.push({
+                    location: { start: _this.start, end: _this.start + 1 },
+                    message: localize('oneOfWarning', "Matches multiple schemas when only one must validate.")
+                });
             }
-            return reviver.call(holder, key, value);
-        }({'': result}, '') : result;
+            if (bestMatch !== null) {
+                validationResult.merge(bestMatch.validationResult);
+                validationResult.propertiesMatches += bestMatch.validationResult.propertiesMatches;
+                validationResult.propertiesValueMatches += bestMatch.validationResult.propertiesValueMatches;
+                if (matchingSchemas) {
+                    matchingSchemas.push.apply(matchingSchemas, bestMatch.matchingSchemas);
+                }
+            }
+            return matches.length;
+        };
+        if (Array.isArray(schema.anyOf)) {
+            testAlternatives(schema.anyOf, false);
+        }
+        if (Array.isArray(schema.oneOf)) {
+            testAlternatives(schema.oneOf, true);
+        }
+        if (Array.isArray(schema.enum)) {
+            if (contains(schema.enum, this.getValue()) === false) {
+                validationResult.warnings.push({
+                    location: { start: this.start, end: this.end },
+                    message: localize('enumWarning', 'Value is not an accepted value. Valid values: {0}', JSON.stringify(schema.enum))
+                });
+            }
+            else {
+                validationResult.enumValueMatch = true;
+            }
+        }
+        if (matchingSchemas !== null) {
+            matchingSchemas.push({ node: this, schema: schema });
+        }
     };
+    return ASTNode;
+})();
+exports.ASTNode = ASTNode;
+var NullASTNode = (function (_super) {
+    __extends(NullASTNode, _super);
+    function NullASTNode(parent, name, start, end) {
+        _super.call(this, parent, 'null', name, start, end);
+    }
+    NullASTNode.prototype.getValue = function () {
+        return null;
+    };
+    return NullASTNode;
+})(ASTNode);
+exports.NullASTNode = NullASTNode;
+var BooleanASTNode = (function (_super) {
+    __extends(BooleanASTNode, _super);
+    function BooleanASTNode(parent, name, value, start, end) {
+        _super.call(this, parent, 'boolean', name, start, end);
+        this.value = value;
+    }
+    BooleanASTNode.prototype.getValue = function () {
+        return this.value;
+    };
+    return BooleanASTNode;
+})(ASTNode);
+exports.BooleanASTNode = BooleanASTNode;
+var ArrayASTNode = (function (_super) {
+    __extends(ArrayASTNode, _super);
+    function ArrayASTNode(parent, name, start, end) {
+        _super.call(this, parent, 'array', name, start, end);
+        this.items = [];
+    }
+    ArrayASTNode.prototype.getChildNodes = function () {
+        return this.items;
+    };
+    ArrayASTNode.prototype.getValue = function () {
+        return this.items.map(function (v) { return v.getValue(); });
+    };
+    ArrayASTNode.prototype.addItem = function (item) {
+        if (item) {
+            this.items.push(item);
+            return true;
+        }
+        return false;
+    };
+    ArrayASTNode.prototype.visit = function (visitor) {
+        var ctn = visitor(this);
+        for (var i = 0; i < this.items.length && ctn; i++) {
+            ctn = this.items[i].visit(visitor);
+        }
+        return ctn;
+    };
+    ArrayASTNode.prototype.validate = function (schema, validationResult, matchingSchemas, offset) {
+        var _this = this;
+        if (offset === void 0) { offset = -1; }
+        if (offset !== -1 && !this.contains(offset)) {
+            return;
+        }
+        _super.prototype.validate.call(this, schema, validationResult, matchingSchemas, offset);
+        if (Array.isArray(schema.items)) {
+            var subSchemas = schema.items;
+            subSchemas.forEach(function (subSchema, index) {
+                var itemValidationResult = new ValidationResult();
+                var item = _this.items[index];
+                if (item) {
+                    item.validate(subSchema, itemValidationResult, matchingSchemas, offset);
+                    validationResult.mergePropertyMatch(itemValidationResult);
+                }
+                else if (_this.items.length >= schema.items.length) {
+                    validationResult.propertiesValueMatches++;
+                }
+            });
+            if (schema.additionalItems === false && this.items.length > subSchemas.length) {
+                validationResult.warnings.push({
+                    location: { start: this.start, end: this.end },
+                    message: localize('additionalItemsWarning', 'Array has too many items according to schema. Expected {0} or fewer', subSchemas.length)
+                });
+            }
+            else if (this.items.length >= schema.items.length) {
+                validationResult.propertiesValueMatches += (this.items.length - schema.items.length);
+            }
+        }
+        else if (schema.items) {
+            this.items.forEach(function (item) {
+                var itemValidationResult = new ValidationResult();
+                item.validate(schema.items, itemValidationResult, matchingSchemas, offset);
+                validationResult.mergePropertyMatch(itemValidationResult);
+            });
+        }
+        if (schema.minItems && this.items.length < schema.minItems) {
+            validationResult.warnings.push({
+                location: { start: this.start, end: this.end },
+                message: localize('minItemsWarning', 'Array has too few items. Expected {0} or more', schema.minItems)
+            });
+        }
+        if (schema.maxItems && this.items.length > schema.maxItems) {
+            validationResult.warnings.push({
+                location: { start: this.start, end: this.end },
+                message: localize('maxItemsWarning', 'Array has too many items. Expected {0} or fewer', schema.minItems)
+            });
+        }
+        if (schema.uniqueItems === true) {
+            var values = this.items.map(function (node) {
+                return node.getValue();
+            });
+            var duplicates = values.some(function (value, index) {
+                return index !== values.lastIndexOf(value);
+            });
+            if (duplicates) {
+                validationResult.warnings.push({
+                    location: { start: this.start, end: this.end },
+                    message: localize('uniqueItemsWarning', 'Array has duplicate items')
+                });
+            }
+        }
+    };
+    return ArrayASTNode;
+})(ASTNode);
+exports.ArrayASTNode = ArrayASTNode;
+var NumberASTNode = (function (_super) {
+    __extends(NumberASTNode, _super);
+    function NumberASTNode(parent, name, start, end) {
+        _super.call(this, parent, 'number', name, start, end);
+        this.isInteger = true;
+        this.value = Number.NaN;
+    }
+    NumberASTNode.prototype.getValue = function () {
+        return this.value;
+    };
+    NumberASTNode.prototype.validate = function (schema, validationResult, matchingSchemas, offset) {
+        if (offset === void 0) { offset = -1; }
+        if (offset !== -1 && !this.contains(offset)) {
+            return;
+        }
+        var typeIsInteger = false;
+        if (schema.type === 'integer' || (Array.isArray(schema.type) && contains(schema.type, 'integer'))) {
+            typeIsInteger = true;
+        }
+        if (typeIsInteger && this.isInteger === true) {
+            this.type = 'integer';
+        }
+        _super.prototype.validate.call(this, schema, validationResult, matchingSchemas, offset);
+        this.type = 'number';
+        var val = this.getValue();
+        if (isNumber(schema.multipleOf)) {
+            if (val % schema.multipleOf !== 0) {
+                validationResult.warnings.push({
+                    location: { start: this.start, end: this.end },
+                    message: localize('multipleOfWarning', 'Value is not divisible by {0}', schema.multipleOf)
+                });
+            }
+        }
+        if (!isUndefined(schema.minimum)) {
+            if (schema.exclusiveMinimum && val <= schema.minimum) {
+                validationResult.warnings.push({
+                    location: { start: this.start, end: this.end },
+                    message: localize('exclusiveMinimumWarning', 'Value is below the exclusive minimum of {0}', schema.minimum)
+                });
+            }
+            if (!schema.exclusiveMinimum && val < schema.minimum) {
+                validationResult.warnings.push({
+                    location: { start: this.start, end: this.end },
+                    message: localize('minimumWarning', 'Value is below the minimum of {0}', schema.minimum)
+                });
+            }
+        }
+        if (!isUndefined(schema.maximum)) {
+            if (schema.exclusiveMaximum && val >= schema.maximum) {
+                validationResult.warnings.push({
+                    location: { start: this.start, end: this.end },
+                    message: localize('exclusiveMaximumWarning', 'Value is above the exclusive maximum of {0}', schema.maximum)
+                });
+            }
+            if (!schema.exclusiveMaximum && val > schema.maximum) {
+                validationResult.warnings.push({
+                    location: { start: this.start, end: this.end },
+                    message: localize('maximumWarning', 'Value is above the maximum of {0}', schema.maximum)
+                });
+            }
+        }
+    };
+    return NumberASTNode;
+})(ASTNode);
+exports.NumberASTNode = NumberASTNode;
+var StringASTNode = (function (_super) {
+    __extends(StringASTNode, _super);
+    function StringASTNode(parent, name, isKey, start, end) {
+        this.isKey = isKey;
+        this.value = '';
+        _super.call(this, parent, 'string', name, start, end);
+    }
+    StringASTNode.prototype.getValue = function () {
+        return this.value;
+    };
+    StringASTNode.prototype.validate = function (schema, validationResult, matchingSchemas, offset) {
+        if (offset === void 0) { offset = -1; }
+        if (offset !== -1 && !this.contains(offset)) {
+            return;
+        }
+        _super.prototype.validate.call(this, schema, validationResult, matchingSchemas, offset);
+        if (schema.minLength && this.value.length < schema.minLength) {
+            validationResult.warnings.push({
+                location: { start: this.start, end: this.end },
+                message: localize('minLengthWarning', 'String is shorter than the minimum length of ', schema.minLength)
+            });
+        }
+        if (schema.maxLength && this.value.length > schema.maxLength) {
+            validationResult.warnings.push({
+                location: { start: this.start, end: this.end },
+                message: localize('maxLengthWarning', 'String is shorter than the maximum length of ', schema.maxLength)
+            });
+        }
+        if (schema.pattern) {
+            var regex = new RegExp(schema.pattern);
+            if (!regex.test(this.value)) {
+                validationResult.warnings.push({
+                    location: { start: this.start, end: this.end },
+                    message: schema.errorMessage || localize('patternWarning', 'String does not match the pattern of "{0}"', schema.pattern)
+                });
+            }
+        }
+    };
+    return StringASTNode;
+})(ASTNode);
+exports.StringASTNode = StringASTNode;
+var PropertyASTNode = (function (_super) {
+    __extends(PropertyASTNode, _super);
+    function PropertyASTNode(parent, key) {
+        _super.call(this, parent, 'property', null, key.start);
+        this.key = key;
+        key.parent = this;
+        key.name = key.value;
+        this.colonOffset = -1;
+    }
+    PropertyASTNode.prototype.getChildNodes = function () {
+        return this.value ? [this.key, this.value] : [this.key];
+    };
+    PropertyASTNode.prototype.setValue = function (value) {
+        this.value = value;
+        return value !== null;
+    };
+    PropertyASTNode.prototype.visit = function (visitor) {
+        return visitor(this) && this.key.visit(visitor) && this.value && this.value.visit(visitor);
+    };
+    PropertyASTNode.prototype.validate = function (schema, validationResult, matchingSchemas, offset) {
+        if (offset === void 0) { offset = -1; }
+        if (offset !== -1 && !this.contains(offset)) {
+            return;
+        }
+        if (this.value) {
+            this.value.validate(schema, validationResult, matchingSchemas, offset);
+        }
+    };
+    return PropertyASTNode;
+})(ASTNode);
+exports.PropertyASTNode = PropertyASTNode;
+var ObjectASTNode = (function (_super) {
+    __extends(ObjectASTNode, _super);
+    function ObjectASTNode(parent, name, start, end) {
+        _super.call(this, parent, 'object', name, start, end);
+        this.properties = [];
+    }
+    ObjectASTNode.prototype.getChildNodes = function () {
+        return this.properties;
+    };
+    ObjectASTNode.prototype.addProperty = function (node) {
+        if (!node) {
+            return false;
+        }
+        this.properties.push(node);
+        return true;
+    };
+    ObjectASTNode.prototype.getFirstProperty = function (key) {
+        for (var i = 0; i < this.properties.length; i++) {
+            if (this.properties[i].key.value === key) {
+                return this.properties[i];
+            }
+        }
+        return null;
+    };
+    ObjectASTNode.prototype.getKeyList = function () {
+        return this.properties.map(function (p) { return p.key.getValue(); });
+    };
+    ObjectASTNode.prototype.getValue = function () {
+        var value = {};
+        this.properties.forEach(function (p) {
+            var v = p.value && p.value.getValue();
+            if (v) {
+                value[p.key.getValue()] = v;
+            }
+        });
+        return value;
+    };
+    ObjectASTNode.prototype.visit = function (visitor) {
+        var ctn = visitor(this);
+        for (var i = 0; i < this.properties.length && ctn; i++) {
+            ctn = this.properties[i].visit(visitor);
+        }
+        return ctn;
+    };
+    ObjectASTNode.prototype.validate = function (schema, validationResult, matchingSchemas, offset) {
+        var _this = this;
+        if (offset === void 0) { offset = -1; }
+        if (offset !== -1 && !this.contains(offset)) {
+            return;
+        }
+        _super.prototype.validate.call(this, schema, validationResult, matchingSchemas, offset);
+        var seenKeys = {};
+        var unprocessedProperties = [];
+        this.properties.forEach(function (node) {
+            var key = node.key.value;
+            seenKeys[key] = node.value;
+            unprocessedProperties.push(key);
+        });
+        if (Array.isArray(schema.required)) {
+            schema.required.forEach(function (propertyName) {
+                if (!seenKeys[propertyName]) {
+                    var key = _this.parent && _this.parent && _this.parent.key;
+                    var location = key ? { start: key.start, end: key.end } : { start: _this.start, end: _this.start + 1 };
+                    validationResult.warnings.push({
+                        location: location,
+                        message: localize('MissingRequiredPropWarning', 'Missing property "{0}"', propertyName)
+                    });
+                }
+            });
+        }
+        var propertyProcessed = function (prop) {
+            var index = unprocessedProperties.indexOf(prop);
+            while (index >= 0) {
+                unprocessedProperties.splice(index, 1);
+                index = unprocessedProperties.indexOf(prop);
+            }
+        };
+        if (schema.properties) {
+            Object.keys(schema.properties).forEach(function (propertyName) {
+                propertyProcessed(propertyName);
+                var prop = schema.properties[propertyName];
+                var child = seenKeys[propertyName];
+                if (child) {
+                    var propertyvalidationResult = new ValidationResult();
+                    child.validate(prop, propertyvalidationResult, matchingSchemas, offset);
+                    validationResult.mergePropertyMatch(propertyvalidationResult);
+                }
+            });
+        }
+        if (schema.patternProperties) {
+            Object.keys(schema.patternProperties).forEach(function (propertyPattern) {
+                var regex = new RegExp(propertyPattern);
+                unprocessedProperties.slice(0).forEach(function (propertyName) {
+                    if (regex.test(propertyName)) {
+                        propertyProcessed(propertyName);
+                        var child = seenKeys[propertyName];
+                        if (child) {
+                            var propertyvalidationResult = new ValidationResult();
+                            child.validate(schema.patternProperties[propertyPattern], propertyvalidationResult, matchingSchemas, offset);
+                            validationResult.mergePropertyMatch(propertyvalidationResult);
+                        }
+                    }
+                });
+            });
+        }
+        if (isObject(schema.additionalProperties)) {
+            unprocessedProperties.forEach(function (propertyName) {
+                var child = seenKeys[propertyName];
+                if (child) {
+                    var propertyvalidationResult = new ValidationResult();
+                    child.validate(schema.additionalProperties, propertyvalidationResult, matchingSchemas, offset);
+                    validationResult.mergePropertyMatch(propertyvalidationResult);
+                }
+            });
+        }
+        else if (schema.additionalProperties === false) {
+            if (unprocessedProperties.length > 0) {
+                unprocessedProperties.forEach(function (propertyName) {
+                    var child = seenKeys[propertyName];
+                    if (child) {
+                        var propertyNode = child.parent;
+                        validationResult.warnings.push({
+                            location: { start: propertyNode.key.start, end: propertyNode.key.end },
+                            message: localize('DisallowedExtraPropWarning', 'Property {0} is not allowed', propertyName)
+                        });
+                    }
+                });
+            }
+        }
+        if (schema.maxProperties) {
+            if (this.properties.length > schema.maxProperties) {
+                validationResult.warnings.push({
+                    location: { start: this.start, end: this.end },
+                    message: localize('MaxPropWarning', 'Object has more properties than limit of {0}', schema.maxProperties)
+                });
+            }
+        }
+        if (schema.minProperties) {
+            if (this.properties.length < schema.minProperties) {
+                validationResult.warnings.push({
+                    location: { start: this.start, end: this.end },
+                    message: localize('MinPropWarning', 'Object has fewer properties than the required number of {0}', schema.minProperties)
+                });
+            }
+        }
+        if (isObject(schema.dependencies)) {
+            Object.keys(schema.dependencies).forEach(function (key) {
+                var prop = seenKeys[key];
+                if (prop) {
+                    if (Array.isArray(schema.dependencies[key])) {
+                        var valueAsArray = schema.dependencies[key];
+                        valueAsArray.forEach(function (requiredProp) {
+                            if (!seenKeys[requiredProp]) {
+                                validationResult.warnings.push({
+                                    location: { start: _this.start, end: _this.end },
+                                    message: localize('RequiredDependentPropWarning', 'Object is missing property {0} required by property {1}', requiredProp, key)
+                                });
+                            }
+                            else {
+                                validationResult.propertiesValueMatches++;
+                            }
+                        });
+                    }
+                    else if (isObject(schema.dependencies[key])) {
+                        var valueAsSchema = schema.dependencies[key];
+                        var propertyvalidationResult = new ValidationResult();
+                        _this.validate(valueAsSchema, propertyvalidationResult, matchingSchemas, offset);
+                        validationResult.mergePropertyMatch(propertyvalidationResult);
+                    }
+                }
+            });
+        }
+    };
+    return ObjectASTNode;
+})(ASTNode);
+exports.ObjectASTNode = ObjectASTNode;
+var JSONDocumentConfig = (function () {
+    function JSONDocumentConfig() {
+        this.ignoreDanglingComma = false;
+    }
+    return JSONDocumentConfig;
+})();
+exports.JSONDocumentConfig = JSONDocumentConfig;
+var ValidationResult = (function () {
+    function ValidationResult() {
+        this.errors = [];
+        this.warnings = [];
+        this.propertiesMatches = 0;
+        this.propertiesValueMatches = 0;
+        this.enumValueMatch = false;
+    }
+    ValidationResult.prototype.hasErrors = function () {
+        return !!this.errors.length || !!this.warnings.length;
+    };
+    ValidationResult.prototype.mergeAll = function (validationResults) {
+        var _this = this;
+        validationResults.forEach(function (validationResult) {
+            _this.merge(validationResult);
+        });
+    };
+    ValidationResult.prototype.merge = function (validationResult) {
+        this.errors = this.errors.concat(validationResult.errors);
+        this.warnings = this.warnings.concat(validationResult.warnings);
+    };
+    ValidationResult.prototype.mergePropertyMatch = function (propertyValidationResult) {
+        this.merge(propertyValidationResult);
+        this.propertiesMatches++;
+        if (propertyValidationResult.enumValueMatch || !propertyValidationResult.hasErrors() && propertyValidationResult.propertiesMatches) {
+            this.propertiesValueMatches++;
+        }
+    };
+    ValidationResult.prototype.compare = function (other) {
+        var hasErrors = this.hasErrors();
+        if (hasErrors !== other.hasErrors()) {
+            return hasErrors ? -1 : 1;
+        }
+        if (this.enumValueMatch !== other.enumValueMatch) {
+            return other.enumValueMatch ? -1 : 1;
+        }
+        if (this.propertiesValueMatches !== other.propertiesValueMatches) {
+            return this.propertiesValueMatches - other.propertiesValueMatches;
+        }
+        return this.propertiesMatches - other.propertiesMatches;
+    };
+    return ValidationResult;
+})();
+exports.ValidationResult = ValidationResult;
+var JSONDocument = (function () {
+    function JSONDocument(config) {
+        this.config = config;
+        this.validationResult = new ValidationResult();
+    }
+    Object.defineProperty(JSONDocument.prototype, "errors", {
+        get: function () {
+            return this.validationResult.errors;
+        },
+        enumerable: true,
+        configurable: true
+    });
+    Object.defineProperty(JSONDocument.prototype, "warnings", {
+        get: function () {
+            return this.validationResult.warnings;
+        },
+        enumerable: true,
+        configurable: true
+    });
+    JSONDocument.prototype.getNodeFromOffset = function (offset) {
+        return this.root && this.root.getNodeFromOffset(offset);
+    };
+    JSONDocument.prototype.getNodeFromOffsetEndInclusive = function (offset) {
+        return this.root && this.root.getNodeFromOffsetEndInclusive(offset);
+    };
+    JSONDocument.prototype.visit = function (visitor) {
+        if (this.root) {
+            this.root.visit(visitor);
+        }
+    };
+    JSONDocument.prototype.validate = function (schema, matchingSchemas, offset) {
+        if (matchingSchemas === void 0) { matchingSchemas = null; }
+        if (offset === void 0) { offset = -1; }
+        if (this.root) {
+            this.root.validate(schema, this.validationResult, matchingSchemas, offset);
+        }
+    };
+    return JSONDocument;
+})();
+exports.JSONDocument = JSONDocument;
+var JSONParser = (function () {
+    function JSONParser() {
+    }
+    JSONParser.prototype.parse = function (text, config) {
+        if (config === void 0) { config = new JSONDocumentConfig(); }
+        var _doc = new JSONDocument(config);
+        var _scanner = Json.createScanner(text, true);
+        function _accept(token) {
+            if (_scanner.getToken() === token) {
+                _scanner.scan();
+                return true;
+            }
+            return false;
+        }
+        function _error(message, node, skipUntilAfter, skipUntil) {
+            if (node === void 0) { node = null; }
+            if (skipUntilAfter === void 0) { skipUntilAfter = []; }
+            if (skipUntil === void 0) { skipUntil = []; }
+            if (_doc.errors.length === 0 || _doc.errors[0].location.start !== _scanner.getTokenOffset()) {
+                var error = { message: message, location: { start: _scanner.getTokenOffset(), end: _scanner.getTokenOffset() + _scanner.getTokenLength() } };
+                _doc.errors.push(error);
+            }
+            if (node) {
+                _finalize(node, false);
+            }
+            if (skipUntilAfter.length + skipUntil.length > 0) {
+                var token = _scanner.getToken();
+                while (token !== Json.SyntaxKind.EOF) {
+                    if (skipUntilAfter.indexOf(token) !== -1) {
+                        _scanner.scan();
+                        break;
+                    }
+                    else if (skipUntil.indexOf(token) !== -1) {
+                        break;
+                    }
+                    token = _scanner.scan();
+                }
+            }
+            return node;
+        }
+        function _checkScanError() {
+            switch (_scanner.getTokenError()) {
+                case Json.ScanError.InvalidUnicode:
+                    _error(localize('InvalidUnicode', 'Invalid unicode sequence in string'));
+                    return true;
+                case Json.ScanError.InvalidEscapeCharacter:
+                    _error(localize('InvalidEscapeCharacter', 'Invalid escape character in string'));
+                    return true;
+                case Json.ScanError.UnexpectedEndOfNumber:
+                    _error(localize('UnexpectedEndOfNumber', 'Unexpected end of number'));
+                    return true;
+                case Json.ScanError.UnexpectedEndOfComment:
+                    _error(localize('UnexpectedEndOfComment', 'Unexpected end of comment'));
+                    return true;
+                case Json.ScanError.UnexpectedEndOfString:
+                    _error(localize('UnexpectedEndOfString', 'Unexpected end of string'));
+                    return true;
+            }
+            return false;
+        }
+        function _finalize(node, scanNext) {
+            node.end = _scanner.getTokenOffset() + _scanner.getTokenLength();
+            if (scanNext) {
+                _scanner.scan();
+            }
+            return node;
+        }
+        function _parseArray(parent, name) {
+            if (_scanner.getToken() !== Json.SyntaxKind.OpenBracketToken) {
+                return null;
+            }
+            var node = new ArrayASTNode(parent, name, _scanner.getTokenOffset());
+            _scanner.scan(); // consume OpenBracketToken
+            var count = 0;
+            if (node.addItem(_parseValue(node, '' + count++))) {
+                while (_accept(Json.SyntaxKind.CommaToken)) {
+                    if (!node.addItem(_parseValue(node, '' + count++)) && !_doc.config.ignoreDanglingComma) {
+                        _error(localize('ValueExpected', 'Value expected'));
+                    }
+                }
+            }
+            if (_scanner.getToken() !== Json.SyntaxKind.CloseBracketToken) {
+                return _error(localize('ExpectedCloseBracket', 'Expected comma or closing bracket'), node);
+            }
+            return _finalize(node, true);
+        }
+        function _parseProperty(parent, keysSeen) {
+            var key = _parseString(null, null, true);
+            if (!key) {
+                if (_scanner.getToken() === Json.SyntaxKind.Unknown) {
+                    var value = _scanner.getTokenValue();
+                    if (value.length > 0 && (value.charAt(0) === '\'' || Json.isLetter(value.charAt(0).charCodeAt(0)))) {
+                        _error(localize('DoubleQuotesExpected', 'Property keys must be doublequoted'));
+                    }
+                }
+                return null;
+            }
+            var node = new PropertyASTNode(parent, key);
+            if (keysSeen[key.value]) {
+                _doc.warnings.push({ location: { start: node.key.start, end: node.key.end }, message: localize('DuplicateKeyWarning', "Duplicate object key") });
+            }
+            keysSeen[key.value] = true;
+            if (_scanner.getToken() === Json.SyntaxKind.ColonToken) {
+                node.colonOffset = _scanner.getTokenOffset();
+            }
+            else {
+                return _error(localize('ColonExpected', 'Colon expected'), node, [], [Json.SyntaxKind.CloseBraceToken, Json.SyntaxKind.CommaToken]);
+            }
+            _scanner.scan(); // consume ColonToken
+            if (!node.setValue(_parseValue(node, key.value))) {
+                return _error(localize('ValueExpected', 'Value expected'), node, [], [Json.SyntaxKind.CloseBraceToken, Json.SyntaxKind.CommaToken]);
+            }
+            node.end = node.value.end;
+            return node;
+        }
+        function _parseObject(parent, name) {
+            if (_scanner.getToken() !== Json.SyntaxKind.OpenBraceToken) {
+                return null;
+            }
+            var node = new ObjectASTNode(parent, name, _scanner.getTokenOffset());
+            _scanner.scan(); // consume OpenBraceToken
+            var keysSeen = {};
+            if (node.addProperty(_parseProperty(node, keysSeen))) {
+                while (_accept(Json.SyntaxKind.CommaToken)) {
+                    if (!node.addProperty(_parseProperty(node, keysSeen)) && !_doc.config.ignoreDanglingComma) {
+                        _error(localize('PropertyExpected', 'Property expected'));
+                    }
+                }
+            }
+            if (_scanner.getToken() !== Json.SyntaxKind.CloseBraceToken) {
+                return _error(localize('ExpectedCloseBrace', 'Expected comma or closing brace'), node);
+            }
+            return _finalize(node, true);
+        }
+        function _parseString(parent, name, isKey) {
+            if (_scanner.getToken() !== Json.SyntaxKind.StringLiteral) {
+                return null;
+            }
+            var node = new StringASTNode(parent, name, isKey, _scanner.getTokenOffset());
+            node.value = _scanner.getTokenValue();
+            _checkScanError();
+            return _finalize(node, true);
+        }
+        function _parseNumber(parent, name) {
+            if (_scanner.getToken() !== Json.SyntaxKind.NumericLiteral) {
+                return null;
+            }
+            var node = new NumberASTNode(parent, name, _scanner.getTokenOffset());
+            if (!_checkScanError()) {
+                var tokenValue = _scanner.getTokenValue();
+                try {
+                    var numberValue = JSON.parse(tokenValue);
+                    if (typeof numberValue !== 'number') {
+                        return _error(localize('InvalidNumberFormat', 'Invalid number format'), node);
+                    }
+                    node.value = numberValue;
+                }
+                catch (e) {
+                    return _error(localize('InvalidNumberFormat', 'Invalid number format'), node);
+                }
+                node.isInteger = tokenValue.indexOf('.') === -1;
+            }
+            return _finalize(node, true);
+        }
+        function _parseLiteral(parent, name) {
+            var node;
+            switch (_scanner.getToken()) {
+                case Json.SyntaxKind.NullKeyword:
+                    node = new NullASTNode(parent, name, _scanner.getTokenOffset());
+                    break;
+                case Json.SyntaxKind.TrueKeyword:
+                    node = new BooleanASTNode(parent, name, true, _scanner.getTokenOffset());
+                    break;
+                case Json.SyntaxKind.FalseKeyword:
+                    node = new BooleanASTNode(parent, name, false, _scanner.getTokenOffset());
+                    break;
+                default:
+                    return null;
+            }
+            return _finalize(node, true);
+        }
+        function _parseValue(parent, name) {
+            return _parseArray(parent, name) || _parseObject(parent, name) || _parseString(parent, name, false) || _parseNumber(parent, name) || _parseLiteral(parent, name);
+        }
+        _scanner.scan();
+        _doc.root = _parseValue(null, null);
+        if (!_doc.root) {
+            _error(localize('Invalid symbol', 'Expected a JSON object, array or literal'));
+        }
+        else if (_scanner.getToken() !== Json.SyntaxKind.EOF) {
+            _error(localize('End of file expected', 'End of file expected'));
+        }
+        return _doc;
+    };
+    return JSONParser;
+})();
+exports.JSONParser = JSONParser;
 });
 
-define("ace/mode/json_worker",["require","exports","module","ace/lib/oop","ace/worker/mirror","ace/mode/json/json_parse"], function(require, exports, module) {
+define("ace/mode/json/jsonIntellisense",["require","exports","module"], function(require, exports, module) {
+"use strict";
+
+var JsonIntellisense = function() {
+};
+
+(function() {
+    this.suggest = function (jsonDocument, jsonSchema, doc, pos, prefix, callback) {
+        var suggestions = [];
+        var result = {
+            currentWord: prefix,
+            incomplete: false,
+            suggestions: []
+        };
+
+        var overwriteBefore
+        var overwriteAfter
+        var proposed = {}
+        var collector = {
+            add: function (suggestion) {
+                if (!proposed[suggestion.caption]) {
+                    proposed[suggestion.caption] = true;
+
+                    suggestion.overwriteBefore = overwriteBefore;
+                    suggestion.overwriteAfter = overwriteAfter;
+                    suggestions.push(suggestion);
+                }
+            }
+        };
+
+        var offset = doc.positionToIndex(pos)
+        var node = jsonDocument.getNodeFromOffsetEndInclusive(offset)
+        var addValue = true;
+        var currentKey = prefix;
+        var currentProperty = null;
+        if (node && node.type === 'string') {
+            var stringNode = node;
+            if (stringNode.isKey) {
+                overwriteBefore = offset - node.start - prefix.length
+                overwriteAfter = node.end - offset
+                addValue = !(node.parent && node.parent.value);
+                currentProperty = node.parent ? node.parent : null;
+                currentKey = stringNode.value
+                if (node.parent) {
+                    node = node.parent.parent;
+                }
+            }
+        }
+        if (node && node.type === 'object' && node.start !== offset) {
+            var properties = node.properties;
+            properties.forEach(function (p) {
+                if (!currentProperty || currentProperty !== p) {
+                    proposed[p.key.value] = true;
+                }
+            });
+            if (jsonSchema) {
+                var isLast = properties.length === 0 || offset >= properties[properties.length - 1].start;
+                this.getPropertySuggestions(jsonSchema, jsonDocument, node, currentKey, addValue, isLast, collector);
+            } else if (node.parent) {
+            }
+        }
+        if (node && (node.type === 'string' || node.type === 'number' || node.type === 'integer' || node.type === 'boolean' || node.type === 'null')) {
+            overwriteBefore = offset - node.start - prefix.length
+            overwriteAfter = node.end - offset
+            node = node.parent;
+        }
+
+        if (jsonSchema) {
+            this.getValueSuggestions(jsonSchema, jsonDocument, node, offset, collector);
+        } else {
+        }
+        callback(suggestions)
+    }
+
+    this.getPropertySuggestions = function (jsonSchema, jsonDocument, node, currentKey, addValue, isLast, collector) {
+        var matchingSchemas = [],
+            that = this;
+        jsonDocument.validate(jsonSchema, matchingSchemas, node.start)
+
+        matchingSchemas.forEach(function (s) {
+            if (s.node === node && !s.inverted) {
+                var schemaProperties = s.schema.properties;
+                if (schemaProperties) {
+                    for (var key in schemaProperties) {
+                        var propertySchema = schemaProperties[key];
+                        var codeSnippet = that.getSnippetForProperty(key, propertySchema, addValue, isLast) || ''
+                        collector.add({
+                            caption: key,
+                            meta: 'property',
+                            label: key,
+                            snippet: codeSnippet,
+                            docHTML: propertySchema.description
+                        });
+                    }
+                }
+            }
+        });
+    }
+
+    this.getValueSuggestions = function (jsonSchema, jsonDocument, node, offset, collector) {
+        if (!node) {
+            this.addDefaultSuggestion(jsonSchema, collector);
+        } else {
+            var parentKey = null;
+            if (node && (node.type === 'property') && offset > node.colonOffset) {
+                var valueNode = node.value;
+                if (valueNode && offset > valueNode.end) {
+                    return; // we are past the value node
+                }
+                parentKey = node.key.value;
+                node = node.parent;
+            }
+            if (node && (parentKey !== null || node.type === 'array')) {
+                var matchingSchemas = [],
+                    that = this;
+                jsonDocument.validate(jsonSchema, matchingSchemas, node.start);
+
+                matchingSchemas.forEach(function (s) {
+                    if (s.node === node && !s.inverted && s.schema) {
+                        if (s.schema.items) {
+                            that.addDefaultSuggestion(s.schema.items, collector);
+                            that.addEnumSuggestion(s.schema.items, collector);
+                        }
+                        if (s.schema.properties) {
+                            var propertySchema = s.schema.properties[parentKey];
+                            if (propertySchema) {
+                                that.addDefaultSuggestion(propertySchema, collector);
+                                that.addEnumSuggestion(propertySchema, collector);
+                            }
+                        }
+                    }
+                });
+
+            }
+        }
+    }
+
+    this.addBooleanSuggestion = function (value, collector) {
+        collector.add({
+            caption: value ? 'true' : 'false',
+            meta: this.getSuggestionType('boolean'),
+            snippet: this.getSnippetForValue(value),
+            docHTML: ''
+        });
+    };
+
+    this.addEnumSuggestion = function (schema, collector) {
+        var that = this;
+        if (Array.isArray(schema.enum)) {
+            schema.enum.forEach(function (enm) {
+                collector.add({
+                    caption: that.getLabelForValue(enm),
+                    meta: that.getSuggestionType(schema.type),
+                    snippet: that.getSnippetForValue(enm),
+                    docHTML: ''
+                });
+            })
+        } else if (schema.type === 'boolean') {
+            this.addBooleanSuggestion(true, collector);
+            this.addBooleanSuggestion(false, collector);
+        }
+        if (Array.isArray(schema.allOf)) {
+            schema.allOf.forEach(function (s) { that.addEnumSuggestion(s, collector) });
+        }
+        if (Array.isArray(schema.anyOf)) {
+            schema.anyOf.forEach(function (s) { that.addEnumSuggestion(s, collector) });
+        }
+        if (Array.isArray(schema.oneOf)) {
+            schema.oneOf.forEach(function (s) { that.addEnumSuggestion(s, collector) });
+        }
+    }
+
+    this.addDefaultSuggestion = function (schema, collector) {
+        var that = this;
+        if (schema.default) {
+            collector.add({
+                caption: that.getLabelForValue(schema.default),
+                meta: 'Default value',
+                snippet: that.getSnippetForValue(schema.default),
+            });
+        }
+        if (Array.isArray(schema.allOf)) {
+            schema.allOf.forEach(function (s) { that.addDefaultSuggestion(s, collector) });
+        }
+        if (Array.isArray(schema.anyOf)) {
+            schema.anyOf.forEach(function (s) { that.addDefaultSuggestion(s, collector) });
+        }
+        if (Array.isArray(schema.oneOf)) {
+            schema.oneOf.forEach(function (s) { that.addDefaultSuggestion(s, collector) });
+        }
+    }
+
+    this.getLabelForValue = function (value) {
+        var label = JSON.stringify(value);
+        if (label.length > 57) {
+            return label.substr(0, 57).trim() + '...';
+        }
+        return label;
+    }
+
+    this.getSnippetForProperty = function (key, propertySchema, addValue, isLast) {
+        var result = '"' + key + '"';
+        if (!addValue) {
+            return result;
+        }
+        result += ': ';
+
+        var defaultVal = propertySchema.default;
+        if (typeof (defaultVal) != "undefined") {
+            result += this.getSnippetForValue(defaultVal);
+        } else if (propertySchema.enum && propertySchema.enum.length > 0) {
+            result += this.getSnippetForValue(propertySchema.enum[0]);
+        } else {
+            switch (propertySchema.type) {
+                case 'boolean':
+                    result += '${0:false}';
+                    break;
+                case 'string':
+                    result += '"${0}"';
+                    break;
+                case 'object':
+                    result += '{\n\t${0}\n}';
+                    break;
+                case 'array':
+                    result += '[\n\t${0}\n]';
+                    break;
+                case 'number':
+                case 'integer':
+                    result += '${0:0}';
+                    break;
+                case 'null':
+                    result += 'null';
+                    break;
+                default:
+                    return result;
+            }
+        }
+        if (!isLast) {
+            result += ',';
+        }
+        return result;
+    }
+
+    this.getSnippetForValue = function (value) {
+        var snippet = JSON.stringify(value, null, '\t');
+        switch (typeof value) {
+            case 'object':
+                if (value === null) {
+                    return '${0:null}';
+                }
+                return snippet;
+            case 'string':
+                return '"${0:' + snippet.substr(1, snippet.length - 2) + '}"';
+            case 'number':
+            case 'integer':
+            case 'boolean':
+                return '${0:' + snippet + '}';
+        }
+        return snippet;
+    }
+
+    this.getSuggestionType = function (type) {
+        if (Array.isArray(type)) {
+            var array = type;
+            type = array.length > 0 ? array[0] : null;
+        }
+        if (!type) {
+            return 'text';
+        }
+        switch (type) {
+            case 'string': return 'text';
+            case 'object': return 'module';
+            case 'property': return 'property';
+            default: return 'value';
+        }
+    }
+
+}).call(JsonIntellisense.prototype);
+
+exports.JsonIntellisense = JsonIntellisense;
+
+});
+
+define("ace/mode/json_worker",["require","exports","module","ace/lib/oop","ace/worker/mirror","ace/mode/json/jsonParser","ace/mode/json/json","ace/mode/json/jsonIntellisense"], function (require, exports, module) {
 "use strict";
 
 var oop = require("../lib/oop");
 var Mirror = require("../worker/mirror").Mirror;
-var parse = require("./json/json_parse");
+var JSONParser = require('./json/jsonParser').JSONParser;
+var Json = require('./json/json');
+var JsonIntellisense = require('./json/jsonIntellisense').JsonIntellisense;
 
-var JsonWorker = exports.JsonWorker = function(sender) {
+var JsonWorker = exports.JsonWorker = function (sender) {
     Mirror.call(this, sender);
     this.setTimeout(200);
+    this.jsonParser = new JSONParser();
+    this.jsonIntellisense = new JsonIntellisense();
+    this.delayedCompletions = []
 };
 
 oop.inherits(JsonWorker, Mirror);
 
-(function() {
+(function () {
+    this.setOptions = function (opts) {
+        var schemaText = opts && opts.jsonSchema;
+        this.jsonSchema = schemaText && Json.parse(schemaText);
+    };
 
-    this.onUpdate = function() {
-        var value = this.doc.getValue();
-        var errors = [];
-        try {
-            if (value)
-                parse(value);
-        } catch (e) {
-            var pos = this.doc.indexToPosition(e.at-1);
-            errors.push({
-                row: pos.row,
-                column: pos.column,
-                text: e.message,
-                type: "error"
+    this.getCompletionsCore = function (pos, prefix, callbackIds) {
+        var jsonDocument = this.jsonDocument,
+            jsonSchema = this.jsonSchema,
+            doc = this.doc,
+            that = this;
+
+        if (!jsonDocument)
+            return false;
+
+        this.jsonIntellisense.suggest(jsonDocument, jsonSchema, doc, pos, prefix, function (suggestions) {
+            for (var i = 0; i < callbackIds.length; i++) {
+                that.sender.callback(suggestions, callbackIds[i]);
+            }
+        })
+    };
+
+    this.getCompletions = function (pos, prefix, callbackId) {
+        if (this.isPending()) {
+            this.delayedCompletions.push({ pos: pos, prefix: prefix, callbackId: callbackId });
+        } else {
+            this.getCompletionsCore(pos, prefix, [callbackId]);
+        }
+    };
+
+    this.onUpdate = function () {
+        var jsonSchema = this.jsonSchema,
+            doc = this.doc,
+            value = doc.getValue(),
+            errors = [],
+            delayedCompletions = this.delayedCompletions;
+        this.jsonDocument = null;
+        if (value) {
+            var document = this.jsonParser.parse(value, {
+                ignoreDanglingComma: false
             });
+            if (jsonSchema) {
+                document.validate(jsonSchema);
+            }
+            document.errors.forEach(function (error) {
+                var pos = doc.indexToPosition(error.location.start);
+                errors.push({
+                    row: pos.row,
+                    column: pos.column,
+                    text: error.message,
+                    type: "error"
+                });
+            })
+            document.warnings.forEach(function (error) {
+                var pos = doc.indexToPosition(error.location.start);
+                errors.push({
+                    row: pos.row,
+                    column: pos.column,
+                    text: error.message,
+                    type: "warning"
+                });
+            })
+            this.jsonDocument = document;
+
+            if (delayedCompletions.length) {
+                var callbackIds = delayedCompletions.map(function (x) { return x.callbackId })
+                var currentCompletion = delayedCompletions[delayedCompletions.length - 1];
+                this.getCompletionsCore(currentCompletion.pos, currentCompletion.prefix, callbackIds)
+                this.delayedCompletions = []
+            }
         }
         this.sender.emit("annotate", errors);
     };

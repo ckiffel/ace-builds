@@ -249,7 +249,6 @@ define("ace/mode/abc",["require","exports","module","ace/lib/oop","ace/mode/text
     var Mode = function () {
         this.HighlightRules = ABCHighlightRules;
         this.foldingRules = new FoldMode();
-        this.$behaviour = this.$defaultBehaviour;
     };
     oop.inherits(Mode, TextMode);
 

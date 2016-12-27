@@ -305,7 +305,6 @@ var Mode = function() {
     this.HighlightRules = LuaHighlightRules;
     
     this.foldingRules = new LuaFoldMode();
-    this.$behaviour = this.$defaultBehaviour;
 };
 oop.inherits(Mode, TextMode);
 

@@ -113,7 +113,6 @@ var MatchingBraceOutdent = require("./matching_brace_outdent").MatchingBraceOutd
 var Mode = function() {
     this.HighlightRules = TextileHighlightRules;
     this.$outdent = new MatchingBraceOutdent();
-    this.$behaviour = this.$defaultBehaviour;
 };
 oop.inherits(Mode, TextMode);
 
